@@ -87,13 +87,11 @@ class CommandProp final
 {
  private:
 	IRCv3::Replies::Fail fail;
-	Cap::Capability cap;
 
  public:
 	CommandProp(Module* parent)
 		: SplitCommand(parent, "PROP", 1)
 		, fail(parent)
-		, cap(parent, "draft/named-modes")
 	{
 		syntax = { "<channel> (<mode>|(+|-)<mode>=[<value>])+" };
 	}
@@ -141,7 +139,7 @@ class CommandProp final
 			return CmdResult::SUCCESS;
 		}
 		else {
-			fail.SendIfCap(src, cap, this, "UNKNOWN", "unknown error");
+			fail.Send(src, this, "UNKNOWN", "unknown error");
 			return CmdResult::FAILURE;
 		}
 	}
@@ -161,7 +159,7 @@ class CommandProp final
 		ModeHandler* mh = ServerInstance->Modes.FindMode(mode_name, MODETYPE_CHANNEL);
 		if (!mh) {
 			/* This mode does not exist */
-			fail.SendIfCap(user, cap, this, "UNKNOWN_MODE", mode_name + " is not a valid mode name");
+			fail.Send(user, this, "UNKNOWN_MODE", mode_name + " is not a valid mode name");
 			return false;
 		}
 
@@ -169,7 +167,7 @@ class CommandProp final
 		{
 			if (separator_position == std::string::npos) {
 				/* Expected a value but didn't get one */
-				fail.SendIfCap(user, cap, this, "MISSING_VALUE", prop + " requires a value");
+				fail.Send(user, this, "MISSING_VALUE", prop + " requires a value");
 				return false;
 			}
 			else {
@@ -184,7 +182,7 @@ class CommandProp final
 			}
 			else {
 				/* Got a value but didn't expect it */
-				fail.SendIfCap(user, cap, this, "UNEXPECTED_VALUE", prop + " does not take a value");
+				fail.Send(user, this, "UNEXPECTED_VALUE", prop + " does not take a value");
 				return false;
 			}
 		}
@@ -199,21 +197,21 @@ class CommandProp final
 	 */
 	bool ListMode(LocalUser* user, Channel* channel, const std::string &prop) {
 		if (prop.find("=") != std::string::npos) {
-			fail.SendIfCap(user, cap, this, "INVALID_SYNTAX", "PROP list request should not have a value");
+			fail.Send(user, this, "INVALID_SYNTAX", "PROP list request should not have a value");
 			return false;
 		}
 
 		ModeHandler* mh = ServerInstance->Modes.FindMode(prop, MODETYPE_CHANNEL);
 
 		if (!mh) {
-			fail.SendIfCap(user, cap, this, "UNKNOWN_MODE", prop + " is not a valid mode name");
+			fail.Send(user, this, "UNKNOWN_MODE", prop + " is not a valid mode name");
 			return false;
 		}
 
 		ListModeBase* listmode = mh->IsListModeBase();
 
 		if (!listmode) {
-			fail.SendIfCap(user, cap, this, "NOT_LISTMODE", prop + " is not a list mode");
+			fail.Send(user, this, "NOT_LISTMODE", prop + " is not a list mode");
 			return false;
 		}
 
@@ -227,6 +225,84 @@ class CommandProp final
 		user->WriteNumeric(RPL_ENDOFLISTPROPLIST, channel->name, prop, "End of mode list");
 
 		return true;
+	}
+};
+
+/* Handles MODE commands sent to clients, and rewrites them as a PROP command */
+class ModeHook final
+	: public ClientProtocol::EventHook
+{
+	std::vector<ClientProtocol::Message*> propmsgs;
+	Cap::Capability cap;
+
+ public:
+
+	ModeHook(Module* mod)
+		: ClientProtocol::EventHook(mod, "MODE")
+		, cap(mod, "draft/named-modes")
+	{
+	}
+
+	void OnEventInit(const ClientProtocol::Event& ev) override
+	{
+		const ClientProtocol::Events::Mode& modeev = static_cast<const ClientProtocol::Events::Mode&>(ev);
+		const ClientProtocol::Messages::Mode& first_modemsg = modeev.GetMessages().front(); /* FIXME: We are sure there is always at least one, right? */
+
+		propmsgs.clear();
+
+		/* TODO: Here, we create one PROP for each change in the MODE. This is correct, but wasteful; so we should merge them into a minimal number of PROPs (while not exceeding the 512 byte limit) */
+
+		for (auto &change : modeev.GetChangeList().getlist()) {
+			/* FIXME: Is it possible for the other modemsgs have different sources? What can we do about those? */
+			const std::string* source = first_modemsg.GetSource();
+			ClientProtocol::Message* propmsg;
+			if (source) {
+				propmsg = new ClientProtocol::Message("PROP", *source, first_modemsg.GetSourceUser());
+			}
+			else {
+				propmsg = new ClientProtocol::Message("PROP", first_modemsg.GetSourceUser());
+			}
+
+			if (!change.mh) {
+				/* FIXME: That's not possible, right? */
+                delete propmsg;
+				continue;
+			}
+
+			/* FIXME: Is it possible for the other modemsgs have different targets? What can we do about those? */
+            std::string target = first_modemsg.GetParams().front();
+            propmsg->PushParam(target);
+
+            char plus_or_minus = change.adding ? '+' : '-';
+			if (change.param.empty()) {
+				propmsg->PushParam(plus_or_minus + change.mh->name);
+			}
+			else {
+				propmsg->PushParam(plus_or_minus + change.mh->name + "=" + change.param);
+			}
+			propmsgs.push_back(propmsg);
+		}
+	}
+
+	ModResult OnPreEventSend(LocalUser* user, const ClientProtocol::Event& ev, ClientProtocol::MessageList& messagelist) override
+	{
+		const ClientProtocol::Events::Mode& modeev = static_cast<const ClientProtocol::Events::Mode&>(ev);
+		size_t nb_modemsgs = modeev.GetMessages().size();
+
+		if (cap.IsEnabled(user)) {
+			/* FIXME: Should we filter some PROPs here? eg. Invite exception should probably only be sent to ops, but we computed the same vector of PROPs for everyone. Possibly use inspircd/src/modules/m_hidemode.cpp as an example. */
+
+			/* FIXME: There are always at least as many PROPs than MODEs, right? */
+
+			/* Overwrite the mode with the first PROP */
+            /* FIXME: shouldn't we delete the first messages in messagelist? I tried doing that, but it causes a double-free, so it looks like it is taken care of elsewhere? But then, who deallocates the messages we are writing here? */
+			std::copy(propmsgs.begin(), propmsgs.begin() + nb_modemsgs, messagelist.begin());
+
+			/* Insert the other PROPs (if any) */
+			messagelist.insert(messagelist.begin()+nb_modemsgs, propmsgs.begin()+nb_modemsgs, propmsgs.end());
+		}
+
+		return MOD_RES_PASSTHRU;
 	}
 };
 
@@ -256,12 +332,15 @@ class ModuleIrcv3NamedModes final
 {
  private:
 	CommandProp cmd;
+	ModeHook modehook;
 	DummyZ dummyZ;
 
  public:
+
 	ModuleIrcv3NamedModes()
 		: Module(VF_VENDOR, "Provides support for adding and removing modes via their long names.")
 		, cmd(this)
+		, modehook(this)
 		, dummyZ(this)
 	{
 	}
