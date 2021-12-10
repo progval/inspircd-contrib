@@ -29,7 +29,7 @@
  * This module itself is a prototype, and should not be used in production,   *
  * as it may cause crashes, privilege escalation, data leaks, and various     *
  * other bugs.                                                                *
- * It is intended for testing client implementation of the +draft/named-modes *
+ * It is intended for testing client implementation of the draft/named-modes  *
  * specification and should not be used in production.                        *
  ******************************************************************************/
 
