@@ -265,15 +265,15 @@ class ModeHook final
 
 			if (!change.mh) {
 				/* FIXME: That's not possible, right? */
-                delete propmsg;
+				delete propmsg;
 				continue;
 			}
 
 			/* FIXME: Is it possible for the other modemsgs have different targets? What can we do about those? */
-            std::string target = first_modemsg.GetParams().front();
-            propmsg->PushParam(target);
+			std::string target = first_modemsg.GetParams().front();
+			propmsg->PushParam(target);
 
-            char plus_or_minus = change.adding ? '+' : '-';
+			char plus_or_minus = change.adding ? '+' : '-';
 			if (change.param.empty()) {
 				propmsg->PushParam(plus_or_minus + change.mh->name);
 			}
@@ -295,7 +295,7 @@ class ModeHook final
 			/* FIXME: There are always at least as many PROPs than MODEs, right? */
 
 			/* Overwrite the mode with the first PROP */
-            /* FIXME: shouldn't we delete the first messages in messagelist? I tried doing that, but it causes a double-free, so it looks like it is taken care of elsewhere? But then, who deallocates the messages we are writing here? */
+			/* FIXME: shouldn't we delete the first messages in messagelist? I tried doing that, but it causes a double-free, so it looks like it is taken care of elsewhere? But then, who deallocates the messages we are writing here? */
 			std::copy(propmsgs.begin(), propmsgs.begin() + nb_modemsgs, messagelist.begin());
 
 			/* Insert the other PROPs (if any) */
