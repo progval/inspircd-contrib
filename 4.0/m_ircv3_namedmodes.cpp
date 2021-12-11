@@ -239,7 +239,7 @@ class ModeHook final
  public:
 
 	ModeHook(Module* mod)
-		: ClientProtocol::EventHook(mod, "MODE")
+		: ClientProtocol::EventHook(mod, "MODE", PRIORITY_LAST) /* Run last so that other modules (eg. m_hidemode) can do their thing, before we convert them to PROP, which they don't know how to handle */
 		, cap(mod, "draft/named-modes")
 	{
 	}
@@ -291,7 +291,7 @@ class ModeHook final
 		size_t nb_modemsgs = modeev.GetMessages().size();
 
 		if (cap.IsEnabled(user)) {
-			/* FIXME: Should we filter some PROPs here? eg. Invite exception should probably only be sent to ops, but we computed the same vector of PROPs for everyone. Possibly use inspircd/src/modules/m_hidemode.cpp as an example. */
+			/* FIXME: We filter some PROPs here, or m_hidemode.cpp becomes useless. */
 
 			/* FIXME: There are always at least as many PROPs than MODEs, right? */
 
@@ -349,6 +349,7 @@ class ModuleIrcv3NamedModes final
 
 	void Prioritize() override
 	{
+		/* Convert MODE +Z before other modules start interpreting modes. */
 		ServerInstance->Modules.SetPriority(this, I_OnPreMode, PRIORITY_FIRST);
 	}
 
