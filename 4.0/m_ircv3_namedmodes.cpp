@@ -247,31 +247,45 @@ class ModeHook final
 	void OnEventInit(const ClientProtocol::Event& ev) override
 	{
 		const ClientProtocol::Events::Mode& modeev = static_cast<const ClientProtocol::Events::Mode&>(ev);
-		const ClientProtocol::Messages::Mode& first_modemsg = modeev.GetMessages().front(); /* FIXME: We are sure there is always at least one, right? */
 
 		propmsgs.clear();
+
+		if (modeev.GetMessages().empty()) {
+			/* This should never happen; other modules (eg. m_hidemode) should return MOD_RES_DENY when filtering so further events are not triggered with an empty list of messages. */
+			ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: m_ircv3_namedmodes got MODE event with empty message list.");
+			return;
+		}
+
+		const ClientProtocol::Messages::Mode& first_modemsg = modeev.GetMessages().front();
+		const std::string* source = first_modemsg.GetSource(); /* Should be the same for all messages. */
+		User* source_user = first_modemsg.GetSourceUser(); /* ditto */
+		std::string target = first_modemsg.GetParams().front(); /* ditto */
 
 		/* TODO: Here, we create one PROP for each change in the MODE. This is correct, but wasteful; so we should merge them into a minimal number of PROPs (while not exceeding the 512 byte limit) */
 
 		for (auto &change : modeev.GetChangeList().getlist()) {
-			/* FIXME: Is it possible for the other modemsgs have different sources? What can we do about those? */
-			const std::string* source = first_modemsg.GetSource();
+
+			if (!change.mh) {
+				/* This should never happen. */
+				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: m_ircv3_namedmodes got MODE event with NULL handler.");
+				return;
+			}
+
 			ClientProtocol::Message* propmsg;
 			if (source) {
-				propmsg = new ClientProtocol::Message("PROP", *source, first_modemsg.GetSourceUser());
+				propmsg = new ClientProtocol::Message("PROP", *source, source_user);
 			}
 			else {
-				propmsg = new ClientProtocol::Message("PROP", first_modemsg.GetSourceUser());
+				propmsg = new ClientProtocol::Message("PROP", source_user);
 			}
 
 			if (!change.mh) {
-				/* FIXME: That's not possible, right? */
+				/* This should never happen. */
+				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: m_ircv3_namedmodes got MODE event with NULL handler.");
 				delete propmsg;
 				continue;
 			}
 
-			/* FIXME: Is it possible for the other modemsgs have different targets? What can we do about those? */
-			std::string target = first_modemsg.GetParams().front();
 			propmsg->PushParam(target);
 
 			char plus_or_minus = change.adding ? '+' : '-';
@@ -291,9 +305,9 @@ class ModeHook final
 		size_t nb_modemsgs = modeev.GetMessages().size();
 
 		if (cap.IsEnabled(user)) {
-			/* FIXME: We filter some PROPs here, or m_hidemode.cpp becomes useless. */
+			/* FIXME: We should filter some PROPs here, or m_hidemode.cpp becomes useless. */
 
-			/* FIXME: There are always at least as many PROPs than MODEs, right? */
+			/* FIXME: There are always at least as many PROPs as MODEs, right? */
 
 			/* Overwrite the mode with the first PROP */
 			/* FIXME: shouldn't we delete the first messages in messagelist? I tried doing that, but it causes a double-free, so it looks like it is taken care of elsewhere? But then, who deallocates the messages we are writing here? */
@@ -392,7 +406,7 @@ class ModuleIrcv3NamedModes final
 			}
 			else if (needs_param_when_unsetting) {
 				/* wat? (param needed only when unsetting) */
-				/* TODO: log an error */
+				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: MODE %s needs a parameter only when unsetting", mh->name.c_str());
 				continue;
 			}
 			else {
