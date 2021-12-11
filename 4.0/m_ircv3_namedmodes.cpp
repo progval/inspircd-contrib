@@ -38,6 +38,7 @@
 #include "modules/cap.h"
 #include "modules/ircv3.h"
 #include "modules/ircv3_replies.h"
+#include "modules/isupport.h"
 
 /* $ModAuthor: Val Lorentz */
 /* $ModAuthorMail: progval+inspircd@progval.net */
@@ -328,7 +329,7 @@ class DummyZ final
 
 class ModuleIrcv3NamedModes final
 	: public Module
-
+	, public ISupport::EventListener
 {
  private:
 	CommandProp cmd;
@@ -339,6 +340,7 @@ class ModuleIrcv3NamedModes final
 
 	ModuleIrcv3NamedModes()
 		: Module(VF_VENDOR, "Provides support for adding and removing modes via their long names.")
+		, ISupport::EventListener(this)
 		, cmd(this)
 		, modehook(this)
 		, dummyZ(this)
@@ -348,6 +350,66 @@ class ModuleIrcv3NamedModes final
 	void Prioritize() override
 	{
 		ServerInstance->Modules.SetPriority(this, I_OnPreMode, PRIORITY_FIRST);
+	}
+
+	void OnBuildISupport(ISupport::TokenMap& tokens) override
+	{
+		tokens["MAXMODES"] = "4"; /* TODO: this is an arbitrary number, check if we can safely increase it. */
+	}
+
+	void OnUserConnect(LocalUser* user) override
+	{
+		WriteModes(user, RPL_CHMODELIST, MODETYPE_CHANNEL);
+		WriteModes(user, RPL_UMODELIST, MODETYPE_USER);
+	}
+
+	void WriteModes(LocalUser* user, unsigned int numeric, ModeType mt) {
+		/* Inspired by CoreModMode::GenerateModeList */
+
+		/* TODO: Here, we create one numeric for each mode type. This is correct, but wasteful; so we should merge them into a minimal number of numerics (while not exceeding the 512 byte limit) */
+		auto modes = ServerInstance->Modes.GetModes(mt);
+		for (auto i=modes.begin(); i!=modes.end(); /* incremented inside the loop */)
+		{
+			const auto& [_, mh] = *i;
+			short unsigned int type;
+			bool needs_param_when_setting = mh->NeedsParam(true);
+			bool needs_param_when_unsetting = mh->NeedsParam(false);
+			PrefixMode* pm = mh->IsPrefixMode();
+			if (pm && pm->GetPrefix()) {
+				type = 5; /* prefix mode */
+			}
+			else if (mh->IsListMode()) {
+				type = 1; /* list mode */
+			}
+			else if (needs_param_when_setting && needs_param_when_unsetting)
+			{
+				type = 2; /* param mode */
+			}
+			else if (needs_param_when_setting)
+			{
+				type = 3; /* param mode */
+			}
+			else if (needs_param_when_unsetting) {
+				/* wat? (param needed only when unsetting) */
+				/* TODO: log an error */
+				continue;
+			}
+			else {
+				type = 4; /* flag */
+			}
+
+			/* TODO: if mt == MODETYPE_USER, make sure we don't output types 1, 2, or 5, as they are not allowed by the spec. */
+			std::string mode_string = InspIRCd::Format("%d:%s=%c", type, mh->name.c_str(), mh->GetModeChar());
+			i++;
+			if (i != modes.end()) {
+				/* "all but the last numeric MUST have a parameter containing only an asterisk (*) preceding the mode list." */
+				user->WriteNumeric(numeric, "*", mode_string);
+			}
+			else {
+				user->WriteNumeric(numeric, mode_string);
+				break;
+			}
+		}
 	}
 
 	ModResult OnPreMode(User* source, User* dest, Channel* channel, Modes::ChangeList& modes) override
