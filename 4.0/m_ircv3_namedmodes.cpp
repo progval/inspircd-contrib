@@ -406,14 +406,17 @@ class ModuleIrcv3NamedModes final
 			}
 			else if (needs_param_when_unsetting) {
 				/* wat? (param needed only when unsetting) */
-				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: MODE %s needs a parameter only when unsetting", mh->name.c_str());
+				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: mode %s needs a parameter only when unsetting.", mh->name.c_str());
 				continue;
 			}
 			else {
 				type = 4; /* flag */
 			}
 
-			/* TODO: if mt == MODETYPE_USER, make sure we don't output types 1, 2, or 5, as they are not allowed by the spec. */
+			if (mt == MODETYPE_USER && (type == 1 || type == 2 || type == 5)) {
+				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: user mode %s has type %d, which is only valid for channel modes.", mh->name.c_str(), type);
+				continue;
+			}
 			std::string mode_string = InspIRCd::Format("%d:%s=%c", type, mh->name.c_str(), mh->GetModeChar());
 			i++;
 			if (i != modes.end()) {
