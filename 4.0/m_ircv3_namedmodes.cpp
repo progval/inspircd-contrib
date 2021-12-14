@@ -58,6 +58,112 @@ enum
 	RPL_UMODELIST = 965,
 };
 
+/* TODO: Use "inspircd.org/" instead? */
+const std::string DEFAULT_VENDOR_PREFIX("inspired.chats.supply/");
+
+/* Array of {inspircd_name, ircv3_name} pairs, to convert between internal events and the wire format.
+ *
+ * This map is obtained by finding matching definitions between https://github.com/progval/ircv3-specifications/blob/named-modes/extensions/named-modes.md#channel-modes and https://docs.inspircd.org/3/channel-modes/
+ */
+const std::vector<std::pair<std::string, std::string>> INSP2IRCV3_CHMODES {
+    /* Core */
+    {"ban", "ban"},
+    {"inviteonly", "inviteonly"},
+    {"key", "key"},
+    {"limit", "limit"},
+    {"moderated", "moderated"},
+    {"noextmsg", "noextmsg"},
+    {"op", "op"},
+    {"private", "private"},
+    {"secret", "secret"},
+    {"topiclock", "topiclock"},
+    {"voice", "voice"},
+
+    /* Modules */
+    {"banexception", "banex"},
+    {"noctcp", "noctcp"},
+    {"invex", "invex"},
+    {"permanent", "permanent"},
+    {"c_registered", "regonly"},
+    {"sslonly", "secureonly"},
+
+    /* TODO: add IRCv3 "mute", by converting to/from the extban */
+
+    /* Common configs of m_customprefix
+     * TODO: reject them when m_customprefix is not loaded, or does not have them configured?
+     * TODO: dynamically chose them by reading m_customprefix's config (eg. if "founder" is called "owner" in the config. */
+    {"admin", "admin"},
+    {"founder", "owner"},
+    {"halfop", "halfop"},
+
+    /* Anything else is translated by prepending the DEFAULT_VENDOR_PREFIX and replacing "_" with "-", or vice-versa */
+};
+
+/* Array of {inspircd_name, ircv3_name} pairs, to convert between internal events and the wire format.
+ *
+ * This map is obtained by finding matching definitions between https://github.com/progval/ircv3-specifications/blob/named-modes/extensions/named-modes.md#user-modes and https://docs.inspircd.org/3/user-modes/
+ */
+const std::vector<std::pair<std::string, std::string>> INSP2IRCV3_UMODES {
+    /* Core */
+    {"invisible", "invisible"},
+    {"oper", "oper"},
+    {"snomask", "snomask"},
+    {"wallops", "wallops"},
+
+    /* Modules */
+    {"bot", "bot"},
+    {"hidechans", "hidechans"},
+    {"cloak", "cloak"},
+
+    /* Anything else is translated by prepending the DEFAULT_VENDOR_PREFIX and replacing "_" with "-", or vice-versa */
+};
+
+/* Converts InspIRCd mode name to an IRCv3-compatible name.
+ *
+ * @param mt Either MODETYPE_CHANNEL or MODETYPE_USER
+ * @param name The internal name of the mode
+ * @return the IRCv3-compatible name (either defined by IRCv3 or vendored)
+ */
+const std::string insp_to_ircv3(ModeType mt, const std::string &name) {
+	const std::vector<std::pair<std::string, std::string>> &table = (mt == MODETYPE_CHANNEL ? INSP2IRCV3_CHMODES : INSP2IRCV3_UMODES);
+	for (auto &[insp_name, ircv3_name] : table) {
+		if (insp_name == name) {
+			return ircv3_name;
+		}
+	}
+
+	/* Could not find a translation, return it vendored. */
+	std::string converted_name = name;
+	std::replace(converted_name.begin(), converted_name.end(), '_', '-');
+	return DEFAULT_VENDOR_PREFIX + converted_name;
+}
+
+/* Converts Converts InspIRCd mode name to an InspIRCd mode name.
+ *
+ * @param mt Either MODETYPE_CHANNEL or MODETYPE_USER
+ * @param name The IRCv3-compatible name of the mode (either defined by IRCv3 or vendored)
+ * @return the internal name, if a translation was found
+ */
+std::optional<const std::string> ircv3_to_insp(ModeType mt, const std::string &name) {
+	const std::vector<std::pair<std::string, std::string>> &table = (mt == MODETYPE_CHANNEL ? INSP2IRCV3_CHMODES : INSP2IRCV3_UMODES);
+	for (auto &[insp_name, ircv3_name] : table) {
+		if (ircv3_name == name) {
+			return insp_name;
+		}
+	}
+
+	/* Could not find a translation. Check if it starts with our vendor prefix. */
+	if (name.rfind(DEFAULT_VENDOR_PREFIX) == 0) {
+		/* It does, so it's either a mode defined by a module, or unknown. Strip the prefix and let InspIRCd core deal with it. */
+		std::string unprefixed_name = name.substr(DEFAULT_VENDOR_PREFIX.length());
+		std::replace(unprefixed_name.begin(), unprefixed_name.end(), '-', '_');
+		return unprefixed_name;
+	}
+
+	/* This is an unknown mode, there is nothing we can do. */
+	return std::nullopt;
+}
+
 static void DisplayModeList(LocalUser* user, Channel* channel)
 {
 	Numeric::ParamBuilder<1> numeric(user, RPL_PROPLIST);
@@ -68,7 +174,7 @@ static void DisplayModeList(LocalUser* user, Channel* channel)
 		if (!channel->IsModeSet(mh))
 			continue;
 
-		numeric.Add(mh->name);
+		numeric.Add(insp_to_ircv3(MODETYPE_CHANNEL, mh->name));
 		ParamModeBase* pm = mh->IsParameterMode();
 		if (pm)
 		{
@@ -94,14 +200,18 @@ class CommandProp final
 		: SplitCommand(parent, "PROP", 1)
 		, fail(parent)
 	{
-		syntax = { "<channel> (<mode>|(+|-)<mode>=[<value>])+" };
+		syntax = { "<channel> (<mode>|((+|-)<mode>=[<value>])+)" };
 	}
 
 	CmdResult HandleLocal(LocalUser* src, const Params& parameters) override
 	{
 		Channel* const chan = ServerInstance->Channels.Find(parameters[0]);
-		if (!chan)
-		{
+		ModeType mt;
+		if (chan) {
+			mt = MODETYPE_CHANNEL;
+		}
+		else {
+			/* FIXME: Handle umodes */
 			src->WriteNumeric(Numerics::NoSuchChannel(parameters[0]));
 			return CmdResult::FAILURE;
 		}
@@ -122,15 +232,15 @@ class CommandProp final
 			switch (prop[0]) {
 				case '+':
 					/* Request to set a mode */
-					success = ChangeMode(src, prop.substr(1), true, modes);
+					success = ChangeMode(src, mt, prop.substr(1), true, modes);
 					break;
 				case '-':
 					/* Request to unset a mode */
-					success = ChangeMode(src, prop.substr(1), false, modes);
+					success = ChangeMode(src, mt, prop.substr(1), false, modes);
 					break;
 				default:
 					/* Handle listmode list request */
-					success = ListMode(src, chan, prop);
+					success = ListMode(src, mt, chan, prop);
 					break;
 			}
 
@@ -152,15 +262,22 @@ class CommandProp final
 	 * @param modes the ChangeList to update if possible.
 	 * @return whether the prop was valid.
 	 */
-	bool ChangeMode(LocalUser *user, const std::string &prop, bool plus, Modes::ChangeList &modes) {
+	bool ChangeMode(LocalUser *user, ModeType mt, const std::string &prop, bool plus, Modes::ChangeList &modes) {
 		std::size_t separator_position = prop.find("=");
 
-		std::string mode_name = prop.substr(0, separator_position);
+		std::string ircv3_mode_name = prop.substr(0, separator_position);
 
-		ModeHandler* mh = ServerInstance->Modes.FindMode(mode_name, MODETYPE_CHANNEL);
+		const std::optional<std::string> insp_mode_name = ircv3_to_insp(mt, ircv3_mode_name);
+		if (insp_mode_name == std::nullopt) {
+			/* This mode does not exist */
+			fail.Send(user, this, "UNKNOWN_MODE", ircv3_mode_name + " is not a valid mode name");
+			return false;
+		}
+
+		ModeHandler* mh = ServerInstance->Modes.FindMode(insp_mode_name.value(), mt);
 		if (!mh) {
 			/* This mode does not exist */
-			fail.Send(user, this, "UNKNOWN_MODE", mode_name + " is not a valid mode name");
+			fail.Send(user, this, "UNKNOWN_MODE", ircv3_mode_name + " is not a valid mode name");
 			return false;
 		}
 
@@ -193,26 +310,33 @@ class CommandProp final
 	 *
 	 * @param user local user who requested the list
 	 * @param channel channel the user requested the list for
-	 * @param prop name of the mode
+	 * @param ircv3_mode_name name of the mode
 	 * @return whether the prop was valid.
 	 */
-	bool ListMode(LocalUser* user, Channel* channel, const std::string &prop) {
-		if (prop.find("=") != std::string::npos) {
+	bool ListMode(LocalUser* user, ModeType mt, Channel* channel, const std::string &ircv3_mode_name) {
+		if (ircv3_mode_name.find("=") != std::string::npos) {
 			fail.Send(user, this, "INVALID_SYNTAX", "PROP list request should not have a value");
 			return false;
 		}
 
-		ModeHandler* mh = ServerInstance->Modes.FindMode(prop, MODETYPE_CHANNEL);
+		const std::optional<std::string> insp_mode_name = ircv3_to_insp(mt, ircv3_mode_name);
+		if (insp_mode_name == std::nullopt) {
+			/* This mode does not exist */
+			fail.Send(user, this, "UNKNOWN_MODE", ircv3_mode_name + " is not a valid mode name");
+			return false;
+		}
+
+		ModeHandler* mh = ServerInstance->Modes.FindMode(insp_mode_name.value(), MODETYPE_CHANNEL);
 
 		if (!mh) {
-			fail.Send(user, this, "UNKNOWN_MODE", prop + " is not a valid mode name");
+			fail.Send(user, this, "UNKNOWN_MODE", ircv3_mode_name + " is not a valid mode name");
 			return false;
 		}
 
 		ListModeBase* listmode = mh->IsListModeBase();
 
 		if (!listmode) {
-			fail.Send(user, this, "NOT_LISTMODE", prop + " is not a list mode");
+			fail.Send(user, this, "NOT_LISTMODE", ircv3_mode_name + " is not a list mode");
 			return false;
 		}
 
@@ -221,9 +345,9 @@ class CommandProp final
 		if (modelist) {
 			/* NULL if the list is empty */
 			for (const auto& item : *modelist)
-				user->WriteNumeric(RPL_LISTPROPLIST, channel->name, prop, item.mask, item.setter, item.time);
+				user->WriteNumeric(RPL_LISTPROPLIST, channel->name, ircv3_mode_name, item.mask, item.setter, item.time);
 		}
-		user->WriteNumeric(RPL_ENDOFLISTPROPLIST, channel->name, prop, "End of mode list");
+		user->WriteNumeric(RPL_ENDOFLISTPROPLIST, channel->name, ircv3_mode_name, "End of mode list");
 
 		return true;
 	}
@@ -353,7 +477,7 @@ class ModuleIrcv3NamedModes final
  public:
 
 	ModuleIrcv3NamedModes()
-		: Module(VF_VENDOR, "Provides support for adding and removing modes via their long names.")
+		: Module(VF_VENDOR, "Provides support for adding and removing modes via their long names, using names in InspIRCd's documentation (rather than IRCv3).")
 		, ISupport::EventListener(this)
 		, cmd(this)
 		, modehook(this)
@@ -417,7 +541,7 @@ class ModuleIrcv3NamedModes final
 				ServerInstance->Logs.Log(MODNAME, LOG_DEFAULT, "Error: user mode %s has type %d, which is only valid for channel modes.", mh->name.c_str(), type);
 				continue;
 			}
-			std::string mode_string = InspIRCd::Format("%d:%s=%c", type, mh->name.c_str(), mh->GetModeChar());
+			std::string mode_string = InspIRCd::Format("%d:%s=%c", type, insp_to_ircv3(mt, mh->name).c_str(), mh->GetModeChar());
 			i++;
 			if (i != modes.end()) {
 				/* "all but the last numeric MUST have a parameter containing only an asterisk (*) preceding the mode list." */
